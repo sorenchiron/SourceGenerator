@@ -1,10 +1,10 @@
 ## Code generator
-##
-##
-##
+## Content/Context: All Resources/Files Under This Project
+## All Published Under Apache 2.0 Licence
+## Author: Soren Chen
+## Copyright: 2015-2016
 ## This translate given logic into codes
 ## Translated codes can be accessed by name in a dictionary
-##
 ##
 import re
 from copy import deepcopy
@@ -85,17 +85,26 @@ class Generator:
     def __init__(self,default_type="bigint",embeded_conf=False):
         self.imported_vars=[] 
             #[ {type:template|list,obj:,name:},...]
-        self.templates=[]
+        self.templates = []
             #[ {name:tmpl_name, content:tmpl_content, args:[arg1,arg2...] } ,...]
-        self.lists=[] 
+        self.lists = [] 
             #[ {name:list_name,
             #  cols: [{colname:,coltype:,tmpls:{tmpl:proce,...} ,...] 
-        self.default_type=default_type
+        self.default_type = default_type
             # if $type is not given in col, this will be used for $type
-        self.export_names=[] 
+        self.export_names = [] 
             # string, 
         self.embeded_conf = embeded_conf
+            # unless ext is .conf, all files are treated as embeded conf 
+        self.var_trace = {}
+            # name->{  father_file -> [father_vars,]  }
+            # if `name` is created locally, set to argv[0], which is self filename.
+            # and set father_vars to [empty]
+
         self.result=None
+            # result is generated in export(),and return to caller
+        self.fname=None
+            # only to save the fname recorded by read_conf()
 
     def show(self):
         from pprint import pprint
@@ -113,7 +122,46 @@ class Generator:
     def is_imported(self,name):
         return name in [i['name'] for i in self.imported_vars]
 
-    
+    def record_var_trace(self,var_name,father_filename,*father_vars):
+        if (father_filename is None) or (father_filename == "this"):
+            # use self conf-filename
+            father_filename=self.fname
+        father_filename=abspath(father_filename)
+        # ensure var_name in trace map
+        if var_name not in self.var_trace:
+            self.var_trace[var_name]={}
+        # ensure father_filename in trace map for var_name
+        if father_filename not in self.var_trace[var_name]:
+            self.var_trace[var_name][father_filename]=[]
+        # ensure father_vars are put under father_filename
+        for father_var in father_vars:
+            if father_var not in self.var_trace[var_name][father_filename]:
+                self.var_trace[var_name][father_filename].append(father_var)
+
+    def deep_resolve_trace(self):
+        updated=True
+        self_filename=abspath(self.fname)
+
+        def is_final_var(var_name):
+            # tell if a var is generic var.
+            #  Don't see this ->   if all of its local deps are final or are itself, then this var is final.  
+            father_files=self.var_trace[var_name]
+            # only inspect non-imported vars, because imported vars are all final.
+            for father_filename in [f for f in father_files if f==self_filename]:
+                if len(father_files[father_filename]) != 0:
+                    return False
+            return True
+        def collect_leaves(var_name):
+            deps=self.var_trace[var_name]
+            ## TODO: flatten the tree and get only the leaf nodes
+            while updated:
+                update=False
+                for name in self.var_trace:
+                    traces=self.var_trace[name]
+                    for father_filename in traces:
+                        dep_var_names = [ n for n in traces[father_filename] if n!=name or father_filename!=self_filename ] # prevent self-reference
+
+
     def is_existing_identifier(self,list_name_str):
         """
         Don't care about imported vars,
@@ -197,8 +245,10 @@ class Generator:
         params = pv_tmpl.findall(param_str)
         for pv in params:
             res = obj_tmpl.match(pv[1])
-            if res is not None:
+            if res is not None: 
                 # that is an object, template or list
+                # record consanguinity
+                self.record_var_trace(caller_name,"this",pv[1])
                 obj_info = self.get_var(pv[1])
                 if obj_info['type']=='template':
                     # put template body as value
@@ -226,7 +276,11 @@ class Generator:
             raise WrongConfSymantic
         return parsed_params
 
-    def match_new_template(self,text):
+    def match_new_template(self,text,trace=True):
+        """
+        when called by match_call_template(), trace is explicitly set False.
+        Because match_call_template() will have already recorded the consanguinity in parse_param().
+        """
         new_tmpl = "(?:\s|\n)*new\s+template\s+(\w+)(?:\s|\n)*\'\'\'(.*?)\'\'\'(?:\s|\n)*"
         arg_tmpl = "\$(\w+)"
         result = re.match(new_tmpl,text,re.MULTILINE|re.DOTALL)
@@ -238,9 +292,13 @@ class Generator:
         self.templates.append( {"name":result.groups()[0],
             "content":result.groups()[1],
             "args":args} )
+        if trace: 
+            # record local var consanguinity, empty father_vars
+            self.record_var_trace(result.groups()[0],"this")
         return text[result.end():]
 
     def match_opr_template(self,text):
+        """rename of template"""
         new_tmpl = "(?:\s|\n)*new\s+template\s+(\w+)(?:\s|\n)*=(?:\s|\n)*(\w+)(?:\s|\n)*"
         result = re.match(new_tmpl,text,re.MULTILINE)
         if result is None:
@@ -252,6 +310,9 @@ class Generator:
         # remove old name var
         self.remove_var(new_tmpl_name)
         self.templates.append(copy_tmpl)
+        # record consanguinity
+        self.record_var_trace(new_tmpl_name,"this",result.groups()[1])
+
         return text[endpos:]
 
     def match_call_template(self,text):
@@ -268,10 +329,11 @@ class Generator:
         if obj_info['type'] != 'template':
             print "not template:",called_tmpl_name,"can't call"
             raise WrongConfSymantic
+        # consanguinity is recorded inside parse_param()
         params = self.parse_param(obj_info['obj'],params_str)
         resolved_content = Template(obj_info['obj']['content']).substitute(params)
         # this agency will deal with varname removing
-        self.match_new_template("new template "+new_tmpl_name+"\n\'\'\'\n"+resolved_content+"\n\'\'\'")
+        self.match_new_template("new template "+new_tmpl_name+"\n\'\'\'\n"+resolved_content+"\n\'\'\'",False)
         return text[endpos:]
 
     def match_new_list(self,text):
@@ -307,6 +369,8 @@ class Generator:
         # remove old at end, this will allow redefine
         self.remove_var(list_name)
         self.lists.append({"name":list_name,"cols":cols})
+        # record consanguinity
+        self.record_var_trace(list_name,"this")
         return text[endpos:]
 
     def match_opr_list(self,text):
@@ -335,6 +399,9 @@ class Generator:
             oprs.remove(opr)
             if opr == '+':
                 opr_result = merge_list(opr_result,var)
+                # only record consanguinity for + operator
+                # because consanguinity doesn't come from `-` opr
+                self.record_var_trace(list_name,"this",var['name']) 
             elif opr == '-':
                 opr_result = exclude_list(opr_result,var)
         opr_result["name"]=list_name
@@ -356,11 +423,11 @@ class Generator:
                 print "can't export unknown variable:",exp_varname
                 raise WrongConfSymantic
             self.export_names.append(exp_varname)
+        # exports don't record consanginity, because they declare no variables
         return text[endpos:]
 
     def match_import(self,text):
         imp_tmpl="(?:\s|\n)*from\s+(.+?)\s+import\s+(\w+(?:\s*,\s*\w+)*|\*)(?:\s|\n)*"
-        confname_tmpl=".+\.conf"
         result = re.match(imp_tmpl,text,re.MULTILINE|re.DOTALL)
         if result is None:
             return None
@@ -372,11 +439,14 @@ class Generator:
             # not a .conf file, which we assume:
             # conf is embeded
             embeded_conf=True
-        father_all_exports = Generator(embeded_conf=embeded_conf).run(conf_path)
+        father = Generator(embeded_conf=embeded_conf)
+        father_all_exports = father.run(conf_path)
         if imports_str=='*':
             # import all from father
             # overwriting importing
             self.imported_vars=[e for e in father_all_exports]+self.imported_vars
+            # gather names of imported vars
+            import_list=[e['name'] for e in father_all_exports]
         else:
             # just import some from father
             import_list = [i.strip() for i in imports_str.split(',')]
@@ -387,6 +457,12 @@ class Generator:
                     print "Error import:",import_name,"not found in",conf_path
                     raise WrongConfSymantic
             self.imported_vars=[iv for iv in father_all_exports if iv['name'] in import_list ]+self.imported_vars
+        # record consanguinity
+        # since vars from fathers are already resolved by fathers' Generator.
+        # we just use fathers' trace.
+        for i in import_list:
+            self.var_trace[i]=father.var_trace[i]
+
         return text[endpos:]
 
     def shift_reduce(self,text):
@@ -435,7 +511,7 @@ class Generator:
             resolved_lines.append(res.groups()[0])
         return "\n".join(resolved_lines)
     
-    def read_conf(self,fname=None):
+    def read_conf(self,fname=None,conf_str=None):
         """
 ==========================================
 conf file should obey the following rules:
@@ -470,21 +546,29 @@ conf file should obey the following rules:
 # export clause
     export $alias
         """
-        if fname is None:
-            # apply in_src_conf mode
-            self.embeded_conf=True
-            # resolving from py-src file
+        if conf_str is not None:
+            text=conf_str.lower()
+            # directly given confstr,means resolved embeded mode.
+            # use self filename
             fname=argv[0]
-        if not self.is_conf_file(fname):
-            # assume it an embeded conf src
-            self.embeded_conf=True
-        # get text first, because we will go into its dir later
-        # so as to be able to resolve local depenency
-        if self.embeded_conf:
-            text = self.resolve_embeded_conf(fname)
         else:
-            text = str(open(fname).read()).lower()
+            # use fname to find configurations
+            if fname is None:
+                # apply in_src_conf mode
+                self.embeded_conf=True
+                # resolving from py-src file
+                fname=argv[0]
+            if not self.is_conf_file(fname):
+                # assume it an embeded conf src
+                self.embeded_conf=True
+            # get text first, because we will go into its dir later
+            # so as to be able to resolve local depenency
+            if self.embeded_conf:
+                text = self.resolve_embeded_conf(fname)
+            else:
+                text = str(open(fname).read()).lower()
 
+        self.fname=fname
         # goto target dir
         cur_dir = getcwd()
         tar_dir = dirname(abspath(fname))
@@ -501,7 +585,7 @@ conf file should obey the following rules:
 
     def export(self):
         """
-        return a list of {type:template|list,obj:,name:}
+        return a list of {name:, type:template|list,obj:}
         """
         # var names in self.export_names are already checked to be existed
         export_names = list(set(self.export_names))
@@ -513,8 +597,8 @@ conf file should obey the following rules:
 
     # this is the only legal entrance
     # of the class object
-    def run(self,conf_path=None):
-        self.read_conf(conf_path)
+    def run(self,conf_path=None,conf_str=None):
+        self.read_conf(conf_path,conf_str)
         return self.export()
 #### END OF CLASS Generator
 

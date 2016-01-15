@@ -17,21 +17,25 @@ configuration syntax:
 ### template is just a simple string-filling function
 ### dollar-values in a template means parameters
 ```
-    new tmplate $TmpName
+    new tmplate TmpName
     '''
-        $colname:$coltype  $grpname:'dowhat' $grp2:"dowhat"
+        colname:coltype  grpname:'dowhat' grp2:"dowhat"
     '''
         -- this is a comment
         ## also a comment
         
         -not comment,error
         #not comment,error
-    for example:
-    new template template -- no keywords or name restriction
+    
+    
+    -- no keywords or name restriction, you can use all the keywords
+    -- for example:
+
+    new template template 
     '''
     create table if not exists $tablename
     (
-    $Cols -- all-case-insensitive
+    $Cols  -- all case-insensitive
     )
     partition by list($partitionby) (partition default)
     
@@ -41,34 +45,41 @@ configuration syntax:
 ### list unfolds itself into a comma-separated string
 ### vars that can be refered in list declaration: $this|$type
 ``` 
-    new list $Listname
+    new list Listname
     '''
-    $col_name:$type $tmpl_name:"max($this)" $tmpl_name2:"min($this)"
+    col_name:type tmpl_name:"max($this)" tmpl_name2:"min($this)"
     '''
 ```
 ### list support + - operations
 ```
-    new list $list2 = $list1 + $list3 - $list4
-    new lsit renamed_list = original_list
+    new list list2 = list1 + list3 - list4
+    new list renamed_list = original_list
 ```
 ### call templates like a function
 ```
-    new template tnew = grpby($a=$b,$c="static_str")
+    new template tnew = grpby(a=b,c="static_str")
     new template rnamed_t = tnew
     ## this is an overwrite
     new template grpby = tnew
 ```
 ### export clause
 ```
-    export $alias
+    export alias
     export list1, temp2 ,t3,t4
         t5,t6
 ```
 ### Use Generator in your python-SQL source file:
 ```
-    from generator import gen
-    vars=gen("test.conf")
-    print vars['created_table']['content']
+    from generator import generate,gen,G
+    
+    very_detailed = generate("test.conf")
+    print very_detailed[0]['name']
+
+    detailed = gen("test.conf")
+    print detailed['created_table']['content']
+
+    simplified = G("test.conf")
+    print simplified['created_table']
 
 ```
 #### and you will get:
@@ -110,3 +121,8 @@ configuration syntax:
         print g['tablename']
 ```
 ##### embed-conf will be ignored by python. it won't affect your src
+
+Known bugs
+
+1. rename a variable to itself will cause trace lost
+2. if one variable's consanguinity contains identical var-name(s), informathion about these and only these consanguinity will be lost. 
