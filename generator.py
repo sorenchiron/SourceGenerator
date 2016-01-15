@@ -18,6 +18,10 @@ class WrongConfSyntax(Exception):
 class WrongConfSymantic(Exception):
     pass
 
+#############################################
+# private tools
+#############################################
+
 # Merge B into A
 def merge_list(A,B):
     Anames = [a["colname"] for a in A["cols"]]
@@ -48,8 +52,37 @@ def var2flatmap(A,key='obj'):
         ret[a['name']]=a[key]
     return ret
 
+def var2simplemap(A):
+    ret={}
+    for a in A:
+        if a['type']=="template":
+            ret[a['name']]=a['obj']['content']
+        elif a['type']=='list':
+            ret[a['name']]=a['obj']['cols']
+    return ret
+
+#############################################
+# Generator Global Settings
+#############################################
+_EMBEDED_CONF_PREFIX="#@"
+    # you can embed conf inside python files now
+
+
+#############################################
+# Main class
+#############################################
 class Generator:
-    def __init__(self,default_type="bigint"):
+    """
+    SourceGenerator is designed for necessary redundancy management
+    When you have to repeat the same list of content in many place
+    , with tiny different format decorations, this programme could be of much help.
+
+    You can declare format `plans`(or `templates`) for lists, and create new list using +/- oprs.
+    With this, you can create content dependencies.
+    When you need to add/delete/modify some columns, you can just modify ONE place, and the other files will
+    update temselfs simultaneously and immediately.
+    """
+    def __init__(self,default_type="bigint",embeded_conf=False):
         self.imported_vars=[] 
             #[ {type:template|list,obj:,name:},...]
         self.templates=[]
@@ -61,15 +94,22 @@ class Generator:
             # if $type is not given in col, this will be used for $type
         self.export_names=[] 
             # string, 
+        self.embeded_conf = embeded_conf
+        self.result=None
 
     def show(self):
+        from pprint import pprint
         print "templates:"
         for t in self.templates:
-            print t
+            pprint(t)
         print "lists:"
         for l in self.lists:
-            print l
+            pprint(l)
     
+    def is_conf_file(self,filename):
+        confname_tmpl=".+\.conf"
+        return re.match(confname_tmpl,filename,re.I) is not None
+
     def is_imported(self,name):
         return name in [i['name'] for i in self.imported_vars]
 
@@ -304,28 +344,35 @@ class Generator:
         return text[endpos:]
 
     def match_export(self,text):
-        exp_tmpl="(?:\s|\n)*export\s+(\w+)(?:\s|\n)*"
+        exp_tmpl="(?:\s|\n)*export(?:\s|\n)+(\w+(?:(?:\s|\n)*,(?:\s|\n)*\w+)*)(?:\s|\n)*"
         result = re.match(exp_tmpl,text,re.MULTILINE)
         if result is None:
             return None
         endpos = result.end()
-        exp_varname = result.groups()[0]
-        # check if can export
-        if (not self.is_existing_identifier(exp_varname)) and not self.is_imported(exp_varname):
-            print "can't export unknown variable:",exp_varname
-            raise WrongConfSymantic
-        self.export_names.append(exp_varname)
+        exp_varnames_str = result.groups()[0]
+        for exp_varname in [e.strip() for e in exp_varnames_str.split(',')]:
+            # check if can export
+            if (not self.is_existing_identifier(exp_varname)) and not self.is_imported(exp_varname):
+                print "can't export unknown variable:",exp_varname
+                raise WrongConfSymantic
+            self.export_names.append(exp_varname)
         return text[endpos:]
 
     def match_import(self,text):
         imp_tmpl="(?:\s|\n)*from\s+(.+?)\s+import\s+(\w+(?:\s*,\s*\w+)*|\*)(?:\s|\n)*"
+        confname_tmpl=".+\.conf"
         result = re.match(imp_tmpl,text,re.MULTILINE|re.DOTALL)
         if result is None:
             return None
         endpos = result.end()
         conf_path = result.groups()[0]
         imports_str = result.groups()[1]
-        father_all_exports = Generator().run(conf_path)
+        embeded_conf=False
+        if not self.is_conf_file(conf_path):
+            # not a .conf file, which we assume:
+            # conf is embeded
+            embeded_conf=True
+        father_all_exports = Generator(embeded_conf=embeded_conf).run(conf_path)
         if imports_str=='*':
             # import all from father
             # overwriting importing
@@ -375,7 +422,20 @@ class Generator:
         print "Syntax Error at:\n^",text
         raise WrongConfSyntax
 
-    def read_conf(self,fname):
+    # return long text string
+    def resolve_embeded_conf(self,fname):
+        embed_pattern="^\s*"+_EMBEDED_CONF_PREFIX+"\s*(.*)"
+        ep=re.compile(embed_pattern)
+        resolved_lines=[]
+        for line in open(fname,'r'):
+            line = str(line).lower()
+            res = ep.match(line)
+            if res is None:
+                continue
+            resolved_lines.append(res.groups()[0])
+        return "\n".join(resolved_lines)
+    
+    def read_conf(self,fname=None):
         """
 ==========================================
 conf file should obey the following rules:
@@ -410,9 +470,20 @@ conf file should obey the following rules:
 # export clause
     export $alias
         """
-        # get text first, because we will go into its dir
+        if fname is None:
+            # apply in_src_conf mode
+            self.embeded_conf=True
+            # resolving from py-src file
+            fname=argv[0]
+        if not self.is_conf_file(fname):
+            # assume it an embeded conf src
+            self.embeded_conf=True
+        # get text first, because we will go into its dir later
         # so as to be able to resolve local depenency
-        text = str(open(fname).read()).lower()
+        if self.embeded_conf:
+            text = self.resolve_embeded_conf(fname)
+        else:
+            text = str(open(fname).read()).lower()
 
         # goto target dir
         cur_dir = getcwd()
@@ -437,34 +508,242 @@ conf file should obey the following rules:
         ret=[]
         for e in export_names:
             ret.append(self.get_var(e))
+        self.result=ret
         return ret
 
     # this is the only legal entrance
     # of the class object
-    def run(self,conf_path):
+    def run(self,conf_path=None):
         self.read_conf(conf_path)
         return self.export()
+#### END OF CLASS Generator
 
-def generate(conf_name):
-    # return dictionary of:
-    # name -> {type:template|list, obj:, name:}
+
+#############################################
+# Entrance Interfaces
+# Shorter the function name is,
+#      , more concise the format is.
+#############################################
+
+def generate(conf_name=None):
+    """returns dictionary of: name -> {type:template|list, obj:, name:}"""
     return tomap(Generator().run(conf_name))
 
-def gen(conf_name):
+def gen(conf_name=None):
+    """
+    returns: name -> obj     
+    obj is {name:,cols:} or {name:,content:,args:}
+    """
     return var2flatmap(Generator().run(conf_name))
 
-#k=generate('test.conf')
-#for i in k:
-#    print k[i]
-#exit()
+def G(conf_name=None):
+    """returns: name -> str_content|[{colname,coltype,tmpls:{tmpl:proce}]"""
+    return var2simplemap(Generator().run(conf_name))
+####################END######################
+
+
+#############################################
+# Public Tools
+#############################################
+
+def findall_root_select(text):
+    """
+    Used to analyze the source files before adapting it into SourceGenerator template
+    Using this function, you can see clearly the 'source-getting' behaviors
+    and know what columns it imports and where it imports from  
+    """
+    # ((?!select).)     
+    # means any character that is not preceded by `select`
+    tmpl="select(?:\s|\n)((?:(?!select).)+?)from(?:\s|\n)+((?:\w+\s*::\s*)?\w+)"
+    sel=re.compile(tmpl,re.DOTALL)
+    res=sel.findall(text)
+    stripped_res=[]
+    # clean formats
+    for r in res:
+        body=  '\n'.join([l.strip() for l in r[0].split('\n')])
+        source= r[1].strip()
+        stripped_res.append( (body,source) )       
+    return sorted(stripped_res,key=lambda x:len(x[1]),reverse=True)
+
+def indent(lines, amount, ch=' '):
+    padding = amount * ch
+    return padding + ('\n'+padding).join(lines.split('\n'))
+
+
+
+#############################################
+#
+#############################################
+version=" 1.1 Beta "
+
+require_argument = True
+no_argument = False
+no_doc = None
+no_abbr = None
+arg_is_set = True
+arg_not_set = False
+arg_val = None
+arg_type_fullname = 1
+arg_type_abbr = 2
+arg_type_value = -1
+
+first_level_args=[]
+max_first_level_args_num=1
+
+def __tell_arg_type__(arg):
+    m = re.match("^\-\-(\w+)", arg)
+    if m is not None:
+        return (arg_type_fullname, m.groups()[0])
+    m = re.match("^\-(\w+)", arg)
+    if m is not None:
+        return (arg_type_abbr, m.groups()[0])
+    return (arg_type_value, arg)
+
+
+def __locate_arg_no__(flag_type, flag, arg_map, arg_index):
+    query_name = ""
+    if flag_type == arg_type_fullname:
+        query_name = "full name"
+    elif flag_type == arg_type_abbr:
+        query_name = "abbreviation"
+    i = 0
+    for arg_info in arg_map:
+        if arg_info[arg_index[query_name]] == flag:
+            return i
+        i += 1
+    return 0
+
+def __format_help_doc__(arg_item, arg_index):
+    if arg_item[arg_index["doc"]] is not no_doc:
+            abbr = arg_item[arg_index["abbreviation"]]
+            arg = arg_item[arg_index["has argument"]]
+
+            if abbr is no_abbr:
+                abbr = "  "
+            else:
+                abbr = '-'+abbr
+
+            if arg is no_argument:
+                arg = ""
+            else:
+                arg = "one arg,"
+
+            doc = "--%s %s\t:%s %s" % (arg_item[arg_index["full name"]],abbr,arg,arg_item[arg_index["doc"]])
+            return doc
+    return no_doc
+
+def __help_bad_arg__(bad_arg, arg_map, arg_index):
+    help_result = []
+    for arg_item in arg_map:
+        if (bad_arg in arg_item[arg_index["full name"]] or
+        (arg_item[arg_index["abbreviation"]] is not no_abbr and
+            bad_arg in arg_item[arg_index["abbreviation"]] ) or
+        ( arg_item[arg_index["doc"]] is not no_doc and
+            bad_arg in arg_item[arg_index["doc"]] )
+        ):
+            help_result.append(__format_help_doc__(arg_item, arg_index))
+    return help_result
+
+def __none__(sa, *args):
+    print("not implemented")
+
+def __bad_arg__(sa, arg_map, arg_index, value):
+    print("bad arguments:", value)
+    print("please use help to see the usage")
+    exit(0)
+
+def __help__(sa, arg_map, arg_index):
+    print(sa.__class__.__doc__)
+    for info in arg_map:
+        doc = __format_help_doc__(info, arg_index)
+        if doc is not no_doc:
+            print(doc)
+    exit(0)
+
+def __arg_e__(sa, arg_map, arg_index, value):
+    res=findall_root_select(open(value,'r').read())
+    print "====explaining source file===="
+    for r in res:
+        print "- - - - - - - - - -"
+        print "Table",r[1]
+        print indent(r[0],4)
+    exit(0)
+
+def __run__(sa, arg_map, arg_index):
+    if len(first_level_args) != 1:
+        print "wrong args, only configration file path is required"
+        exit(0) 
+    sa.run(first_level_args[0])
+
+def __arg_show__(sa, arg_map, arg_index):
+    sa.show()
+
+
+
+__arg_map__ = [
+    ["version",no_abbr,__none__,no_argument,arg_not_set,arg_val,"SourceGenerator, version "+version+" by sorenchen. copyright 2016-2017"],
+    ["bad arg", no_abbr, __bad_arg__, no_argument, arg_not_set, arg_val,no_doc],
+    ["help", 'h', __none__, no_argument, arg_not_set, arg_val,"yeild embeded configuration mode"],
+    ["explain", 'e', __arg_e__, require_argument, arg_not_set, arg_val,"yeild embeded configuration mode"],
+    ["conf", 'c', __none__, no_argument, arg_not_set, arg_val,"yeild configuration file mode"],
+    ## run stage
+    ["run", no_abbr, __run__, no_argument, arg_is_set, arg_val,no_doc],  # This is the RUN[] stage
+    ## run over
+    ["show", no_abbr, __arg_show__, no_argument, arg_is_set, arg_val,no_doc] 
+]
+
+__arg_index__ = {"full name": 0, "abbreviation": 1, "function": 2, "has argument": 3, "argument set": 4,
+                 "argument value": 5,"doc":6}
+
+
+def __resolve_arguments__(args, arg_map, arg_index):
+    total = len(args)
+    dealing = 0
+    while dealing <= total - 1:
+        (arg_type, value) = __tell_arg_type__(args[dealing])
+        if arg_type < 0:
+            if len(first_level_args)<max_first_level_args_num:
+                # can accept first level args
+                first_level_args.append(value)
+                dealing+=1
+                continue
+            # can't tolerate more first level args, error
+            print ("sqla: bad argument input at:",value)
+            help_result = __help_bad_arg__(value,arg_map,arg_index)
+            if len(help_result)>0:
+                print ("sqla assuming you want these:")
+                for h in help_result:
+                    print (h)
+            exit()
+        no = __locate_arg_no__(arg_type, value, arg_map, arg_index)
+        if arg_map[no][arg_index["has argument"]]:
+            if dealing + 1 >= total or __tell_arg_type__(args[dealing + 1])[
+                0] > 0:  # if no further args given OR  type is flag or abbr flag
+                print("sqla: flag", value, "requires one argument, none given")
+                exit(0)
+            dealing += 1
+            arg_map[no][arg_index["argument value"]] = args[dealing]
+        arg_map[no][arg_index["argument set"]] = True
+        dealing += 1
+
+
+def __exec__(sa, arg_map, arg_index):
+    for arg in arg_map:
+        if arg[arg_index["argument set"]]:
+            if arg[arg_index["has argument"]]:
+                arg[arg_index["function"]](sa, arg_map, arg_index, arg[arg_index["argument value"]])
+            else:
+                arg[arg_index["function"]](sa, arg_map, arg_index)
+
 
 if __name__ == "__main__":
-    args = argv[1:]
-    if len(args) != 1:
-        print "wrong args, only configration file path is required"
-    else:
-        for i in generate(args[0]):
-            print i
+    if len(argv) > 1:
+        args = argv[1:]
+        __resolve_arguments__(args, __arg_map__, __arg_index__)
+    g=Generator()
+    __exec__(g, __arg_map__, __arg_index__)
+
+
     
 
 
